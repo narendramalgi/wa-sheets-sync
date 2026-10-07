@@ -1,5 +1,8 @@
 name: Build APK
 
+# This file contains the whole app, so the build works no matter how the other
+# files in this repository were uploaded. Only this file is needed.
+
 on:
   push:
   workflow_dispatch:
@@ -11,8 +14,6 @@ jobs:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -22,10 +23,1114 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
+      - name: Write app source files
+        run: |
+          rm -rf apkbuild
+          mkdir -p apkbuild/app/src/main/java/com/example/washeets
+          cd apkbuild
+          cat > 'settings.gradle' <<'__END_OF_FILE_0__'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "wa-sheets-sync"
+          include ':app'
+          __END_OF_FILE_0__
+          cat > 'build.gradle' <<'__END_OF_FILE_1__'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          __END_OF_FILE_1__
+          cat > 'gradle.properties' <<'__END_OF_FILE_2__'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          __END_OF_FILE_2__
+          cat > 'app/build.gradle' <<'__END_OF_FILE_3__'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.washeets'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId 'com.example.washeets'
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 2
+                  versionName '2.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              lint {
+                  abortOnError false
+              }
+          }
+          __END_OF_FILE_3__
+          cat > 'app/src/main/AndroidManifest.xml' <<'__END_OF_FILE_4__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <!-- Lets the listener see WhatsApp's notifications on Android 11+ -->
+              <queries>
+                  <package android:name="com.whatsapp" />
+                  <package android:name="com.whatsapp.w4b" />
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:label="MRP Accounts"
+                  android:icon="@android:drawable/ic_menu_upload"
+                  android:theme="@android:style/Theme.Material.Light.DarkActionBar"
+                  android:usesCleartextTraffic="false">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <!-- 9 PM wake-up / 3 AM check; re-armed after a restart or app update -->
+                  <receiver
+                      android:name=".NightAlarm"
+                      android:exported="false">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                          <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                      </intent-filter>
+                  </receiver>
+
+                  <service
+                      android:name=".WaListenerService"
+                      android:exported="true"
+                      android:label="MRP Accounts listener"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          __END_OF_FILE_4__
+          cat > 'app/src/main/java/com/example/washeets/MainActivity.java' <<'__END_OF_FILE_5__'
+          package com.example.washeets;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.ComponentName;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.PowerManager;
+          import android.provider.Settings;
+          import android.text.InputType;
+          import android.text.TextUtils;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.util.List;
+
+          /** Single screen: permissions, settings, tonight's status, manual entry and the activity log. */
+          public class MainActivity extends Activity {
+
+              private Store store;
+              private TextView status, tonight, chats, log;
+              private EditText url, secret, group, fromHour, untilHour, manual;
+
+              private final SharedPreferences.OnSharedPreferenceChangeListener onChange =
+                      (prefs, key) -> runOnUiThread(this::refresh);
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  store = new Store(this);
+                  setTitle("MRP Accounts → Sheets");
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  int pad = dp(16);
+                  root.setPadding(pad, pad, pad, pad);
+
+                  // Tonight
+                  root.addView(header("Tonight"));
+                  tonight = text("");
+                  tonight.setTextSize(16);
+                  root.addView(tonight);
+
+                  // 1. Permissions
+                  root.addView(header("1. Permissions"));
+                  status = text("");
+                  root.addView(status);
+                  root.addView(button("Allow notification access", v ->
+                          startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))));
+                  root.addView(button("Keep running in background (battery)", v -> askBattery()));
+
+                  // 2. Settings
+                  root.addView(header("2. Settings"));
+                  root.addView(label("Apps Script web app URL (ends in /exec)"));
+                  url = input(InputType.TYPE_TEXT_VARIATION_URI, 1);
+                  url.setText(store.url());
+                  root.addView(url);
+
+                  root.addView(label("Secret (same as SECRET in the script)"));
+                  secret = input(InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, 1);
+                  secret.setText(store.secret());
+                  root.addView(secret);
+
+                  root.addView(label("WhatsApp group (exact name)"));
+                  group = input(0, 1);
+                  group.setText(store.groupsRaw());
+                  root.addView(group);
+
+                  root.addView(label("Accept reports posted from (hour, 24h)  —  until (hour, 24h)"));
+                  LinearLayout hours = new LinearLayout(this);
+                  hours.setOrientation(LinearLayout.HORIZONTAL);
+                  fromHour = numberInput(store.fromHour());
+                  untilHour = numberInput(store.untilHour());
+                  TextView dash = text("  to  ");
+                  hours.addView(fromHour);
+                  hours.addView(dash);
+                  hours.addView(untilHour);
+                  root.addView(hours);
+                  root.addView(small("Default 22 to 3 = 10 PM to 3 AM. The app wakes up one hour earlier (9 PM)."));
+
+                  root.addView(button("Save", v -> {
+                      save();
+                      Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show();
+                      Uploader.flush(this);
+                  }));
+                  root.addView(button("Test connection to sheet", v -> {
+                      save();
+                      Uploader.testConnection(this);
+                      Toast.makeText(this, "Checking… see the log below", Toast.LENGTH_SHORT).show();
+                  }));
+
+                  // 3. Manual entry
+                  root.addView(header("3. Missed a night? Add it manually"));
+                  root.addView(small("Paste the report message here. It is saved with the current date & time."));
+                  manual = input(InputType.TYPE_TEXT_FLAG_MULTI_LINE, 6);
+                  manual.setHint("Pp- 6039\nZ- 975\nS- 795\nCash- 4670 - 800 = 300\nAcc G- 1088\nAcc P- 2233");
+                  root.addView(manual);
+                  root.addView(button("Add this report to the sheet", v -> addManual()));
+
+                  // 4. Status
+                  root.addView(header("4. Status"));
+                  root.addView(button("Retry sending now", v -> Uploader.flush(this)));
+                  root.addView(label("Chats seen recently (tap to use as the group name)"));
+                  chats = text("");
+                  chats.setTextColor(Color.rgb(25, 118, 210));
+                  root.addView(chats);
+
+                  root.addView(label("Activity log"));
+                  log = text("");
+                  log.setTypeface(Typeface.MONOSPACE);
+                  log.setTextSize(12);
+                  root.addView(log);
+
+                  ScrollView sv = new ScrollView(this);
+                  sv.addView(root);
+                  setContentView(sv);
+
+                  if (Build.VERSION.SDK_INT >= 33
+                          && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+                  }
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  store.registerListener(onChange);
+                  NightAlarm.schedule(this);
+                  refresh();
+                  Uploader.flush(this);
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  store.unregisterListener(onChange);
+              }
+
+              private void save() {
+                  store.saveSettings(url.getText().toString(), secret.getText().toString(),
+                          group.getText().toString(), parseHour(fromHour, Store.DEFAULT_FROM_HOUR),
+                          parseHour(untilHour, Store.DEFAULT_UNTIL_HOUR));
+                  NightAlarm.schedule(this);
+              }
+
+              private void addManual() {
+                  String text = manual.getText().toString();
+                  if (!Report.looksLikeReport(text)) {
+                      Toast.makeText(this, "That doesn't look like the report (needs at least 3 of Pp, Z, S, Cash, Acc G, Acc P)",
+                              Toast.LENGTH_LONG).show();
+                      return;
+                  }
+                  new AlertDialog.Builder(this)
+                          .setTitle("Add this report?")
+                          .setMessage("It will be added as a new row with today's date & time.")
+                          .setPositiveButton("Add", (d, w) -> {
+                              save();
+                              Uploader.addManual(this, text);
+                              manual.setText("");
+                              Toast.makeText(this, "Sending…", Toast.LENGTH_SHORT).show();
+                          })
+                          .setNegativeButton("Cancel", null)
+                          .show();
+              }
+
+              private void refresh() {
+                  long now = System.currentTimeMillis();
+                  String night = store.nightKey(now);
+                  String window = NightAlarm.hourLabel(store.fromHour()) + " – " + NightAlarm.hourLabel(store.untilHour());
+                  String t;
+                  if (store.isDone(night)) {
+                      t = "✅ Report for " + Store.prettyNight(night) + " saved. Stopped until tomorrow "
+                              + NightAlarm.hourLabel(store.wakeHour()) + ".";
+                  } else if (store.inWindow(now)) {
+                      t = "👀 Listening now for the report (" + window + ").";
+                  } else {
+                      t = "💤 Waiting. Starts at " + NightAlarm.hourLabel(store.wakeHour())
+                              + ", accepts the report " + window + ".";
+                  }
+                  int q = store.queueSize();
+                  if (q > 0) t += "\n⏳ " + q + " waiting to be sent (no internet?)";
+                  tonight.setText(t);
+
+                  boolean access = hasNotificationAccess();
+                  PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                  boolean battery = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+                  status.setText((access ? "✅" : "❌") + " Notification access\n"
+                          + (battery ? "✅" : "⚠") + " Unrestricted battery\n"
+                          + (store.url().isEmpty() ? "❌ Apps Script URL not set" : "✅ Apps Script URL set") + "\n"
+                          + (store.secret().isEmpty() ? "❌ Secret not set" : "✅ Secret set"));
+
+                  List<String> recent = store.recentChats();
+                  chats.setText(recent.isEmpty() ? "(none yet — wait for any WhatsApp message)" : TextUtils.join("\n", recent));
+                  chats.setOnClickListener(recent.isEmpty() ? null : v -> pickChat(recent));
+
+                  List<String> lines = store.logLines();
+                  log.setText(lines.isEmpty() ? "(nothing yet)" : TextUtils.join("\n", lines));
+              }
+
+              private void pickChat(List<String> recent) {
+                  String[] items = recent.toArray(new String[0]);
+                  new AlertDialog.Builder(this)
+                          .setTitle("Use this group")
+                          .setItems(items, (d, which) -> {
+                              group.setText(items[which]);
+                              Toast.makeText(this, "Set — tap Save", Toast.LENGTH_SHORT).show();
+                          })
+                          .show();
+              }
+
+              private boolean hasNotificationAccess() {
+                  String enabled = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
+                  ComponentName me = new ComponentName(this, WaListenerService.class);
+                  return enabled != null && enabled.contains(me.flattenToString());
+              }
+
+              private void askBattery() {
+                  try {
+                      Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                      i.setData(Uri.parse("package:" + getPackageName()));
+                      startActivity(i);
+                  } catch (Exception e) {
+                      startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+                  }
+              }
+
+              private static int parseHour(EditText e, int fallback) {
+                  try {
+                      int h = Integer.parseInt(e.getText().toString().trim());
+                      return (h >= 0 && h <= 23) ? h : fallback;
+                  } catch (NumberFormatException ex) {
+                      return fallback;
+                  }
+              }
+
+              // ---------- tiny view helpers ----------
+              private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+
+              private TextView header(String s) {
+                  TextView t = text(s);
+                  t.setTextSize(18);
+                  t.setTypeface(Typeface.DEFAULT_BOLD);
+                  t.setPadding(0, dp(18), 0, dp(6));
+                  return t;
+              }
+
+              private TextView label(String s) {
+                  TextView t = text(s);
+                  t.setTextSize(13);
+                  t.setPadding(0, dp(10), 0, dp(2));
+                  t.setTextColor(Color.DKGRAY);
+                  return t;
+              }
+
+              private TextView small(String s) {
+                  TextView t = text(s);
+                  t.setTextSize(12);
+                  t.setTextColor(Color.GRAY);
+                  return t;
+              }
+
+              private TextView text(String s) {
+                  TextView t = new TextView(this);
+                  t.setText(s);
+                  t.setTextSize(15);
+                  return t;
+              }
+
+              private EditText input(int variation, int lines) {
+                  EditText e = new EditText(this);
+                  e.setInputType(InputType.TYPE_CLASS_TEXT | variation);
+                  if (lines > 1) {
+                      e.setSingleLine(false);
+                      e.setMinLines(lines);
+                      e.setGravity(android.view.Gravity.TOP | android.view.Gravity.START);
+                  } else {
+                      e.setSingleLine(true);
+                  }
+                  e.setLayoutParams(new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                  return e;
+              }
+
+              private EditText numberInput(int value) {
+                  EditText e = new EditText(this);
+                  e.setInputType(InputType.TYPE_CLASS_NUMBER);
+                  e.setSingleLine(true);
+                  e.setEms(3);
+                  e.setText(String.valueOf(value));
+                  return e;
+              }
+
+              private Button button(String s, View.OnClickListener l) {
+                  Button btn = new Button(this);
+                  btn.setText(s);
+                  btn.setAllCaps(false);
+                  btn.setOnClickListener(l);
+                  return btn;
+              }
+          }
+          __END_OF_FILE_5__
+          cat > 'app/src/main/java/com/example/washeets/NightAlarm.java' <<'__END_OF_FILE_6__'
+          package com.example.washeets;
+
+          import android.app.AlarmManager;
+          import android.app.PendingIntent;
+          import android.content.BroadcastReceiver;
+          import android.content.ComponentName;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.service.notification.NotificationListenerService;
+
+          import java.util.Calendar;
+
+          /**
+           * Two daily alarms:
+           *  - 9 PM  "wake up": makes sure the WhatsApp listener is running and retries any unsent rows.
+           *  - 3 AM  "check":   if no report was captured for the night, shows a reminder notification.
+           * Also re-arms itself after the phone restarts or the app is updated.
+           */
+          public class NightAlarm extends BroadcastReceiver {
+              static final String ACTION_WAKE = "com.example.washeets.NIGHT_WAKE";
+              static final String ACTION_CHECK = "com.example.washeets.NIGHT_CHECK";
+              private static final long HOUR = 60L * 60L * 1000L;
+
+              @Override
+              public void onReceive(Context c, Intent intent) {
+                  String action = intent.getAction();
+                  Store s = new Store(c);
+                  if (ACTION_WAKE.equals(action)) {
+                      s.log("🌙 Started for tonight — waiting for the report from "
+                              + hourLabel(s.fromHour()) + " onwards");
+                      NotificationListenerService.requestRebind(new ComponentName(c, WaListenerService.class));
+                      Uploader.flush(c);
+                  } else if (ACTION_CHECK.equals(action)) {
+                      String night = s.nightKey(System.currentTimeMillis() - HOUR);
+                      if (s.isDone(night)) {
+                          s.log("🌅 Finished for the night of " + Store.prettyNight(night));
+                      } else {
+                          s.log("⚠ No report captured for the night of " + Store.prettyNight(night));
+                          Notifier.show(c, 2, "No report captured last night",
+                                  "Nothing from " + s.groupsRaw().split("\n")[0].trim()
+                                          + " was saved. Open the app to add it manually.");
+                      }
+                      Uploader.flush(c);
+                  }
+                  schedule(c); // set up the next ones (also covers boot / app update)
+              }
+
+              /** (Re)arms both alarms for their next occurrence. Safe to call any time. */
+              public static void schedule(Context c) {
+                  Store s = new Store(c);
+                  AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+                  if (am == null) return;
+                  set(c, am, ACTION_WAKE, 1, nextAt(s.wakeHour()));
+                  set(c, am, ACTION_CHECK, 2, nextAt(s.untilHour()));
+              }
+
+              private static void set(Context c, AlarmManager am, String action, int code, long when) {
+                  Intent i = new Intent(c, NightAlarm.class).setAction(action);
+                  PendingIntent pi = PendingIntent.getBroadcast(c, code, i,
+                          PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                  // Inexact but still fires while the phone is dozing (usually within a few minutes).
+                  am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when, pi);
+              }
+
+              private static long nextAt(int hour) {
+                  Calendar c = Calendar.getInstance();
+                  c.set(Calendar.HOUR_OF_DAY, hour);
+                  c.set(Calendar.MINUTE, 0);
+                  c.set(Calendar.SECOND, 0);
+                  c.set(Calendar.MILLISECOND, 0);
+                  if (c.getTimeInMillis() <= System.currentTimeMillis() + 60_000L) c.add(Calendar.DAY_OF_MONTH, 1);
+                  return c.getTimeInMillis();
+              }
+
+              static String hourLabel(int h) {
+                  int h12 = h % 12 == 0 ? 12 : h % 12;
+                  return h12 + (h < 12 ? " AM" : " PM");
+              }
+          }
+          __END_OF_FILE_6__
+          cat > 'app/src/main/java/com/example/washeets/Notifier.java' <<'__END_OF_FILE_7__'
+          package com.example.washeets;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.Context;
+          import android.content.Intent;
+
+          /** Small status notifications: "report saved" and "no report captured". */
+          public final class Notifier {
+              private static final String CHANNEL = "status";
+
+              private Notifier() {}
+
+              public static void show(Context c, int id, String title, String text) {
+                  NotificationManager nm = (NotificationManager) c.getSystemService(Context.NOTIFICATION_SERVICE);
+                  if (nm == null) return;
+                  nm.createNotificationChannel(new NotificationChannel(
+                          CHANNEL, "Report status", NotificationManager.IMPORTANCE_DEFAULT));
+
+                  PendingIntent open = PendingIntent.getActivity(c, 0,
+                          new Intent(c, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+
+                  Notification n = new Notification.Builder(c, CHANNEL)
+                          .setSmallIcon(android.R.drawable.ic_menu_upload)
+                          .setContentTitle(title)
+                          .setContentText(text)
+                          .setStyle(new Notification.BigTextStyle().bigText(text))
+                          .setContentIntent(open)
+                          .setAutoCancel(true)
+                          .build();
+                  try {
+                      nm.notify(id, n);
+                  } catch (SecurityException ignored) {
+                      // Notification permission not granted — the activity log still has the details.
+                  }
+              }
+          }
+          __END_OF_FILE_7__
+          cat > 'app/src/main/java/com/example/washeets/Report.java' <<'__END_OF_FILE_8__'
+          package com.example.washeets;
+
+          import java.util.Arrays;
+          import java.util.HashSet;
+          import java.util.Locale;
+          import java.util.Set;
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+
+          /** Quick check that a message is the nightly accounts report (the sheet script does the full parsing). */
+          public final class Report {
+              private static final Set<String> LABELS = new HashSet<>(Arrays.asList(
+                      "pp", "petpooja", "z", "zomato", "s", "swiggy", "cash",
+                      "accg", "gpay", "googlepay", "accp", "phonepe"));
+              private static final Pattern LINE =
+                      Pattern.compile("^\\s*[*_~]*([A-Za-z][A-Za-z .]*?)[*_~]*\\s*[-–—:=]\\s*\\S.*$");
+              public static final int MIN_FIELDS = 3;
+
+              private Report() {}
+
+              public static boolean looksLikeReport(CharSequence text) {
+                  if (text == null) return false;
+                  Set<String> found = new HashSet<>();
+                  for (String line : text.toString().split("\\r?\\n")) {
+                      Matcher m = LINE.matcher(line);
+                      if (!m.matches()) continue;
+                      String key = m.group(1).toLowerCase(Locale.ROOT).replaceAll("[^a-z]", "");
+                      if (LABELS.contains(key)) found.add(key);
+                  }
+                  return found.size() >= MIN_FIELDS;
+              }
+          }
+          __END_OF_FILE_8__
+          cat > 'app/src/main/java/com/example/washeets/Store.java' <<'__END_OF_FILE_9__'
+          package com.example.washeets;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+
+          import org.json.JSONArray;
+          import org.json.JSONException;
+          import org.json.JSONObject;
+
+          import java.text.SimpleDateFormat;
+          import java.util.ArrayList;
+          import java.util.Calendar;
+          import java.util.Date;
+          import java.util.LinkedHashSet;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Set;
+
+          /** Settings, night window, outgoing queue, duplicate filter and activity log (SharedPreferences). */
+          public final class Store {
+              public static final String DEFAULT_GROUP = "ACCOUNTS - MRP VENTURES";
+              public static final int DEFAULT_FROM_HOUR = 22; // accept messages posted from 10 PM…
+              public static final int DEFAULT_UNTIL_HOUR = 3;  // …until 3 AM
+
+              private static final String PREFS = "wa_sheets";
+              private static final int MAX_SEEN_IDS = 1000;
+              private static final int MAX_LOG = 80;
+              private static final int MAX_CHATS = 30;
+              private static final Object LOCK = new Object();
+
+              private final SharedPreferences p;
+
+              public Store(Context c) {
+                  p = c.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+              }
+
+              // ---------- settings ----------
+              public String url() { return p.getString("url", "").trim(); }
+              public String secret() { return p.getString("secret", "").trim(); }
+              public String groupsRaw() { return p.getString("groups", DEFAULT_GROUP); }
+              public int fromHour() { return p.getInt("from_hour", DEFAULT_FROM_HOUR); }
+              public int untilHour() { return p.getInt("until_hour", DEFAULT_UNTIL_HOUR); }
+
+              /** The app "wakes up" one hour before reports are accepted (9 PM by default). */
+              public int wakeHour() { return (fromHour() + 23) % 24; }
+
+              public void saveSettings(String url, String secret, String groups, int fromHour, int untilHour) {
+                  p.edit().putString("url", url.trim()).putString("secret", secret.trim())
+                          .putString("groups", groups)
+                          .putInt("from_hour", clampHour(fromHour)).putInt("until_hour", clampHour(untilHour))
+                          .apply();
+              }
+
+              private static int clampHour(int h) { return Math.max(0, Math.min(23, h)); }
+
+              /** Selected group names, lower-cased and trimmed. */
+              public Set<String> groups() {
+                  Set<String> out = new LinkedHashSet<>();
+                  for (String line : groupsRaw().split("\n")) {
+                      String g = normalize(line);
+                      if (!g.isEmpty()) out.add(g);
+                  }
+                  return out;
+              }
+
+              public static String normalize(String s) {
+                  return s == null ? "" : s.trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+              }
+
+              // ---------- night window ----------
+              /** True if a message with this timestamp was posted inside the accepted window (10 PM – 3 AM). */
+              public boolean inWindow(long time) {
+                  Calendar c = Calendar.getInstance();
+                  c.setTimeInMillis(time);
+                  int h = c.get(Calendar.HOUR_OF_DAY);
+                  int from = fromHour(), until = untilHour();
+                  if (from == until) return true;
+                  return from < until ? (h >= from && h < until) : (h >= from || h < until);
+              }
+
+              /** The calendar date a night belongs to: 1 AM on the 9th counts as the night of the 8th. */
+              public String nightKey(long time) {
+                  Calendar c = Calendar.getInstance();
+                  c.setTimeInMillis(time);
+                  if (fromHour() > untilHour() && c.get(Calendar.HOUR_OF_DAY) < untilHour()) {
+                      c.add(Calendar.DAY_OF_MONTH, -1);
+                  }
+                  return new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(c.getTime());
+              }
+
+              public static String prettyNight(String key) {
+                  try {
+                      Date d = new SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(key);
+                      return new SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(d);
+                  } catch (Exception e) {
+                      return key;
+                  }
+              }
+
+              public boolean isDone(String nightKey) { return nightKey.equals(p.getString("done_night", "")); }
+
+              public void markDone(String nightKey) { p.edit().putString("done_night", nightKey).apply(); }
+
+              public String lastDoneNight() { return p.getString("done_night", ""); }
+
+              // ---------- duplicate filter ----------
+              /** Returns true the first time an id is seen, false afterwards. */
+              public boolean markNew(String id) {
+                  synchronized (LOCK) {
+                      List<String> ids = readList("seen_ids");
+                      if (ids.contains(id)) return false;
+                      ids.add(id);
+                      while (ids.size() > MAX_SEEN_IDS) ids.remove(0);
+                      writeList("seen_ids", ids);
+                      return true;
+                  }
+              }
+
+              // ---------- outgoing queue ----------
+              public void enqueue(JSONObject msg) {
+                  synchronized (LOCK) {
+                      JSONArray q = readArray("queue");
+                      q.put(msg);
+                      p.edit().putString("queue", q.toString()).apply();
+                  }
+              }
+
+              public JSONArray peekQueue(int max) {
+                  synchronized (LOCK) {
+                      JSONArray q = readArray("queue");
+                      JSONArray out = new JSONArray();
+                      for (int i = 0; i < q.length() && i < max; i++) out.put(q.opt(i));
+                      return out;
+                  }
+              }
+
+              /** Removes the first n items (the ones that were just sent). */
+              public void dropFromQueue(int n) {
+                  synchronized (LOCK) {
+                      JSONArray q = readArray("queue");
+                      JSONArray rest = new JSONArray();
+                      for (int i = n; i < q.length(); i++) rest.put(q.opt(i));
+                      p.edit().putString("queue", rest.toString()).apply();
+                  }
+              }
+
+              public int queueSize() {
+                  synchronized (LOCK) { return readArray("queue").length(); }
+              }
+
+              // ---------- activity log & recently seen chats ----------
+              public void log(String line) {
+                  synchronized (LOCK) {
+                      List<String> l = readList("log");
+                      String ts = new SimpleDateFormat("dd MMM hh:mm a", Locale.getDefault()).format(new Date());
+                      l.add(0, ts + "  " + line);
+                      while (l.size() > MAX_LOG) l.remove(l.size() - 1);
+                      writeList("log", l);
+                  }
+              }
+
+              public List<String> logLines() {
+                  synchronized (LOCK) { return readList("log"); }
+              }
+
+              public void sawChat(String name) {
+                  if (name == null || name.trim().isEmpty()) return;
+                  synchronized (LOCK) {
+                      List<String> l = readList("chats");
+                      if (!l.isEmpty() && l.get(0).equals(name)) return;
+                      l.remove(name);
+                      l.add(0, name);
+                      while (l.size() > MAX_CHATS) l.remove(l.size() - 1);
+                      writeList("chats", l);
+                  }
+              }
+
+              public List<String> recentChats() {
+                  synchronized (LOCK) { return readList("chats"); }
+              }
+
+              public void registerListener(SharedPreferences.OnSharedPreferenceChangeListener l) {
+                  p.registerOnSharedPreferenceChangeListener(l);
+              }
+
+              public void unregisterListener(SharedPreferences.OnSharedPreferenceChangeListener l) {
+                  p.unregisterOnSharedPreferenceChangeListener(l);
+              }
+
+              // ---------- helpers ----------
+              private JSONArray readArray(String key) {
+                  try {
+                      return new JSONArray(p.getString(key, "[]"));
+                  } catch (JSONException e) {
+                      return new JSONArray();
+                  }
+              }
+
+              private List<String> readList(String key) {
+                  JSONArray a = readArray(key);
+                  List<String> out = new ArrayList<>();
+                  for (int i = 0; i < a.length(); i++) out.add(a.optString(i));
+                  return out;
+              }
+
+              private void writeList(String key, List<String> l) {
+                  p.edit().putString(key, new JSONArray(l).toString()).apply();
+              }
+          }
+          __END_OF_FILE_9__
+          cat > 'app/src/main/java/com/example/washeets/Uploader.java' <<'__END_OF_FILE_10__'
+          package com.example.washeets;
+
+          import android.content.Context;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.BufferedReader;
+          import java.io.InputStream;
+          import java.io.InputStreamReader;
+          import java.io.OutputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.text.NumberFormat;
+          import java.util.Locale;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          /** Sends queued reports to the Google Apps Script web app, one request at a time. */
+          public final class Uploader {
+              private static final ExecutorService EXEC = Executors.newSingleThreadExecutor();
+              private static final int BATCH = 10;
+
+              private Uploader() {}
+
+              public static void flush(Context ctx) {
+                  final Context app = ctx.getApplicationContext();
+                  EXEC.execute(() -> flushNow(app));
+              }
+
+              /** Checks the URL and secret without adding anything to the sheet. */
+              public static void testConnection(Context ctx) {
+                  final Context app = ctx.getApplicationContext();
+                  EXEC.execute(() -> {
+                      Store s = new Store(app);
+                      try {
+                          JSONObject m = new JSONObject();
+                          m.put("id", "test-" + System.currentTimeMillis());
+                          m.put("test", true);
+                          JSONArray arr = new JSONArray();
+                          arr.put(m);
+                          JSONObject r = post(s, arr);
+                          s.log("✅ Connected to the sheet. Take Home Cash till date: " + rupees(r.optDouble("totalCash", 0)));
+                      } catch (Exception e) {
+                          s.log("❌ Connection test failed: " + e.getMessage());
+                      }
+                  });
+              }
+
+              /** Queues a report typed or pasted into the app (for a night the phone missed). */
+              public static void addManual(Context ctx, String text) {
+                  Store s = new Store(ctx);
+                  try {
+                      long now = System.currentTimeMillis();
+                      JSONObject m = new JSONObject();
+                      m.put("id", "manual-" + now);
+                      m.put("group", "Manual entry");
+                      m.put("sender", "");
+                      m.put("time", now);
+                      m.put("captured", now);
+                      m.put("text", text.trim());
+                      m.put("report", true);
+                      s.enqueue(m);
+                      s.log("✍ Manual report queued");
+                  } catch (Exception e) {
+                      s.log("❌ Could not queue manual report: " + e.getMessage());
+                  }
+                  flush(ctx);
+              }
+
+              private static void flushNow(Context app) {
+                  Store s = new Store(app);
+                  if (s.url().isEmpty()) {
+                      if (s.queueSize() > 0) s.log("⏸ Not sent yet: add your Apps Script URL in Settings");
+                      return;
+                  }
+                  while (true) {
+                      JSONArray batch = s.peekQueue(BATCH);
+                      if (batch.length() == 0) return;
+                      try {
+                          JSONObject r = post(s, batch);
+                          s.dropFromQueue(batch.length());
+                          int added = r.optInt("added");
+                          int skipped = r.optInt("skipped");
+                          if (added > 0) {
+                              String cash = r.isNull("cash") ? "—" : rupees(r.optDouble("cash"));
+                              String total = rupees(r.optDouble("totalCash", 0));
+                              s.log("✅ Saved to sheet. Cash " + cash + " · Till date " + total);
+                              Notifier.show(app, 1, "Report saved to Google Sheet",
+                                      "Take Home Cash: " + cash + "\nTake Home Cash till date: " + total);
+                          }
+                          if (skipped > 0) {
+                              s.log("⚠ Sheet skipped " + skipped + " message(s) — already saved, or not in the report format");
+                          }
+                      } catch (Exception e) {
+                          s.log("⚠ Send failed, will retry: " + e.getMessage());
+                          return;
+                      }
+                  }
+              }
+
+              private static JSONObject post(Store s, JSONArray messages) throws Exception {
+                  JSONObject body = new JSONObject();
+                  body.put("secret", s.secret());
+                  body.put("messages", messages);
+                  byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+
+                  HttpURLConnection c = (HttpURLConnection) new URL(s.url()).openConnection();
+                  c.setConnectTimeout(20000);
+                  c.setReadTimeout(60000);
+                  c.setInstanceFollowRedirects(true); // Apps Script answers via a redirect
+                  c.setRequestMethod("POST");
+                  c.setDoOutput(true);
+                  c.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+                  try (OutputStream os = c.getOutputStream()) {
+                      os.write(bytes);
+                  }
+                  int code = c.getResponseCode();
+                  String text = read(code >= 400 ? c.getErrorStream() : c.getInputStream());
+                  c.disconnect();
+                  if (code >= 400) throw new Exception("HTTP " + code);
+
+                  JSONObject r;
+                  try {
+                      r = new JSONObject(text);
+                  } catch (Exception e) {
+                      throw new Exception("Unexpected reply — check the URL ends in /exec and access is 'Anyone'");
+                  }
+                  if (!r.optBoolean("ok")) throw new Exception(r.optString("error", "server error"));
+                  return r;
+              }
+
+              static String rupees(double v) {
+                  NumberFormat f = NumberFormat.getNumberInstance(new Locale("en", "IN"));
+                  f.setMaximumFractionDigits(2);
+                  return "₹" + f.format(v);
+              }
+
+              private static String read(InputStream in) throws Exception {
+                  if (in == null) return "";
+                  StringBuilder sb = new StringBuilder();
+                  try (BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+                      String line;
+                      while ((line = br.readLine()) != null) sb.append(line).append('\n');
+                  }
+                  return sb.toString().trim();
+              }
+          }
+          __END_OF_FILE_10__
+          cat > 'app/src/main/java/com/example/washeets/WaListenerService.java' <<'__END_OF_FILE_11__'
+          package com.example.washeets;
+
+          import android.app.Notification;
+          import android.app.Person;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Parcelable;
+          import android.service.notification.NotificationListenerService;
+          import android.service.notification.StatusBarNotification;
+
+          import org.json.JSONObject;
+
+          /**
+           * Reads WhatsApp notifications and picks out the nightly accounts report:
+           *  1. only from the selected group (ACCOUNTS - MRP VENTURES),
+           *  2. only if posted between 10 PM and 3 AM,
+           *  3. only if it looks like the report (Pp / Z / S / Cash / Acc G / Acc P lines),
+           *  4. only the first one each night — after that it stops until the next night.
+           */
+          public class WaListenerService extends NotificationListenerService {
+
+              private static final String WA = "com.whatsapp";
+              private static final String WA_BUSINESS = "com.whatsapp.w4b";
+
+              @Override
+              public void onListenerConnected() {
+                  new Store(this).log("🔌 Listener connected");
+                  NightAlarm.schedule(this);
+                  Uploader.flush(this);
+              }
+
+              @Override
+              public void onNotificationPosted(StatusBarNotification sbn) {
+                  String pkg = sbn.getPackageName();
+                  if (!WA.equals(pkg) && !WA_BUSINESS.equals(pkg)) return;
+                  try {
+                      handle(sbn.getNotification());
+                  } catch (Exception e) {
+                      new Store(this).log("⚠ Could not read a notification: " + e.getMessage());
+                  }
+              }
+
+              private void handle(Notification n) throws Exception {
+                  Bundle ex = n.extras;
+                  if (ex == null) return;
+                  Store store = new Store(this);
+
+                  Parcelable[] msgs = ex.getParcelableArray(Notification.EXTRA_MESSAGES);
+                  CharSequence convTitle = ex.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE);
+                  CharSequence title = ex.getCharSequence(Notification.EXTRA_TITLE);
+
+                  if (msgs != null && msgs.length > 0) {
+                      // Modern "messaging style" notification: one entry per message.
+                      String chat = cleanChatName(convTitle != null ? convTitle : title, convTitle == null);
+                      if (chat.isEmpty()) return;
+                      store.sawChat(chat);
+                      if (!store.groups().contains(Store.normalize(chat))) return;
+                      for (Parcelable p : msgs) {
+                          if (!(p instanceof Bundle)) continue;
+                          Bundle b = (Bundle) p;
+                          consider(store, chat, senderOf(b),
+                                  b.getLong("time", System.currentTimeMillis()), b.getCharSequence("text"));
+                      }
+                      return;
+                  }
+
+                  // Fallback for simple notifications: title "Group: Sender", text "message".
+                  if ((n.flags & Notification.FLAG_GROUP_SUMMARY) != 0) return;
+                  CharSequence text = ex.getCharSequence(Notification.EXTRA_TEXT);
+                  if (title == null || text == null) return;
+                  String t = title.toString();
+                  String chat;
+                  String sender = "";
+                  int colon = t.indexOf(": ");
+                  if (colon > 0) {
+                      chat = cleanChatName(t.substring(0, colon), false);
+                      sender = t.substring(colon + 2).trim();
+                  } else {
+                      chat = cleanChatName(t, false);
+                  }
+                  store.sawChat(chat);
+                  if (!store.groups().contains(Store.normalize(chat))) return;
+                  consider(store, chat, sender, n.when > 0 ? n.when : System.currentTimeMillis(), text);
+              }
+
+              private void consider(Store store, String chat, String sender, long time, CharSequence text)
+                      throws Exception {
+                  if (text == null) return;
+                  String body = text.toString().trim();
+                  if (body.isEmpty()) return;
+
+                  // WhatsApp re-posts earlier messages in each notification; handle each message once.
+                  String id = Integer.toHexString((chat + "|" + sender + "|" + time + "|" + body).hashCode())
+                          + "-" + time;
+                  if (!store.markNew(id)) return;
+
+                  if (!store.inWindow(time)) return;              // posted before 10 PM (or after 3 AM)
+                  if (!Report.looksLikeReport(body)) return;      // ordinary chat in the group
+
+                  String night = store.nightKey(time);
+                  if (store.isDone(night)) {
+                      store.log("↩ Another report-like message from " + sender
+                              + " ignored — tonight's report is already saved");
+                      return;
+                  }
+
+                  JSONObject m = new JSONObject();
+                  m.put("id", id);
+                  m.put("group", chat);
+                  m.put("sender", sender);
+                  m.put("time", time);                            // when it was posted in WhatsApp
+                  m.put("captured", System.currentTimeMillis());  // phone date & time → first column
+                  m.put("text", body);
+                  m.put("report", true);
+                  store.enqueue(m);
+                  store.markDone(night);
+                  store.log("📥 Captured report for " + Store.prettyNight(night)
+                          + (sender.isEmpty() ? "" : " (from " + sender + ")") + " — done for tonight");
+                  Uploader.flush(this);
+              }
+
+              private static String senderOf(Bundle b) {
+                  CharSequence s = b.getCharSequence("sender");
+                  if (s != null) return s.toString().trim();
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                      Object person = b.get("sender_person");
+                      if (person instanceof Person) {
+                          CharSequence name = ((Person) person).getName();
+                          if (name != null) return name.toString().trim();
+                      }
+                  }
+                  return "";
+              }
+
+              /** Turns "ACCOUNTS - MRP VENTURES (3 messages)" or "Group: Ravi" into the group name. */
+              static String cleanChatName(CharSequence raw, boolean mayContainSender) {
+                  if (raw == null) return "";
+                  String s = raw.toString().trim();
+                  if (mayContainSender) {
+                      int colon = s.indexOf(": ");
+                      if (colon > 0) s = s.substring(0, colon);
+                  }
+                  s = s.replaceAll("\\s*\\(\\d+[^)]*\\)\\s*$", "");      // drop "(3 messages)"
+                  s = s.replace('‎', ' ').replace('‏', ' ');    // invisible direction marks
+                  return s.trim();
+              }
+          }
+          __END_OF_FILE_11__
+          find . -type f | sort
+
       - name: Build debug APK
+        working-directory: apkbuild
         run: gradle assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
         with:
           name: wa-sheets-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: apkbuild/app/build/outputs/apk/debug/app-debug.apk
